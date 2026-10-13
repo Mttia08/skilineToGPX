@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <title>Skigebiete hinzufügen</title>
+    <style>
+        #container {
+            height: 85vh;
+            width: 100%;
+            display: flex;
+        }
+
+        #sidebar {
+            height: 100%;
+            width: 30%;
+        }
+
+        #map {
+            height: 100%;
+            width: 70%;
+        }
+    </style>
+</head>
+<body>
+    <h1>Skigebiete hinzufügen</h1>
+    <div id="container">
+        <div id="sidebar"></div>
+        <div id="map"></div>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map("map").setView([46.758, 7.628], 13);
+
+        L.tileLayer(
+            "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            {
+                attribution: '&copy; OpenStreetMap contributors'
+            }
+        ).addTo(map);
+
+        const polylineGroup = L.featureGroup().addTo(map);
+
+        window.onload = function() {
+            let sidebar = document.getElementById("sidebar");
+            sidebar.innerHTML = `
+                <h2>1. Bbox des neuen Skigebiets wählen</h2>
+                <button onclick="getBboxData()">Bbox abrufen</button>
+            `;
+        };
+
+        function getBboxData() {
+            const bounds = map.getBounds();
+            
+            const params = new URLSearchParams({
+                south: bounds.getSouth().toString(),
+                west: bounds.getWest().toString(),
+                north: bounds.getNorth().toString(),
+                east: bounds.getEast().toString()
+            });
+
+            let sidebar = document.getElementById("sidebar");
+            sidebar.innerHTML += `<p>OSM-Daten werden geladen...</p>`;
+
+            fetch(`/get_bbox_data?${params.toString()}`)
+                .then(response => {
+                    if (!response.ok) throw new Error("Network response was not ok");
+                    return response.json();
+                })
+                .then(data => {
+                    runProcessing(data);
+                })
+                .catch(error => {
+                    sidebar.innerHTML = `
+                        <h2>1. Bbox des neuen Skigebiets wählen</h2>
+                        <button onclick="getBboxData()">Bbox abrufen</button>
+                    `;
+                    alert(`Error fetching map data: ${error}`)
+                });
+        }
+
+        function waitForUserAction(osmLiftName) {
+            return new Promise((resolve) => {
+                const sidebar = document.getElementById("sidebar");
+                
+                sidebar.innerHTML = `
+                    <h2>2. Skiline-Namen der Lifte eingeben</h2>
+                    <input type="text" id="liftInput" value="${osmLiftName}" onfocus="this.select()">
+                    <button id="skipBtn">Lift überspringen</button>
+                    <button id="saveBtn">Speichern</button>
+                `;
+
+                const skipBtn = document.getElementById("skipBtn");
+                const saveBtn = document.getElementById("saveBtn");
+                const liftInput = document.getElementById("liftInput");
+
+                saveBtn.addEventListener('click', () => {
+                    const name = liftInput.value.trim();
+                    if (name !== "") {
+                        resolve({ action: 'save', name: name });
+                    } else {
+                        alert("Bitte gib einen Liftnamen ein oder klicke auf überspringen.");
+                    }
+                });
+
+                skipBtn.addEventListener('click', () => {
+                    resolve({ action: 'skip' });
+                });
+            });
+        }
+
+        function waitForResortId() {
+            return new Promise((resolve) => {
+                const sidebar = document.getElementById("sidebar");
+                
+                sidebar.innerHTML = `
+                    <h2>3. Skiline-ResortId des Skigebiets eingeben</h2>
+                    <p>Mehreren Ids durch Komma trennen (Bsp. "610,611,612,613,614")
+                    <input type="text" id="resortIdInput">
+                    <button id="saveBtn">Speichern</button>
+                `;
+
+                const saveBtn = document.getElementById("saveBtn");
+                const resortIdInput = document.getElementById("resortIdInput");
+
+                saveBtn.addEventListener('click', () => {
+                    const resortId = resortIdInput.value.trim();
+                    if (resortId !== "") {
+                        resolve(resortId);
+                    } else {
+                        alert("Bitte gib eine ResortId ein.");
+                    }
+                });
+            });
+        }
+
+        async function runProcessing(data) {
+            var outputData = {
+                "resortId": null,
+                "resortLifts": {},
+                "resortRuns": []
+            };
+
+            let sidebar = document.getElementById("sidebar");
+
+            for (let feature of data["features"]) {
+                if (Object.hasOwn(feature["properties"]["tags"], "piste:type") && feature["geometry"]["type"] === "LineString") {
+                    outputData["resortRuns"].push(feature["geometry"]["coordinates"]);
+                    
+                } else if (Object.hasOwn(feature["properties"]["tags"], "aerialway") && feature["geometry"]["type"] === "LineString") {
+                    const latlngs = feature["geometry"]["coordinates"].map(coord => [coord[1], coord[0]]);
+                    
+                    polylineGroup.clearLayers();
+                    const polyline = L.polyline(latlngs, { color: 'blue' }).addTo(polylineGroup);
+                    map.flyToBounds(polyline.getBounds(), {
+                        animate: true,
+                        duration: 1.5,
+                        padding: [30, 30]
+                    });
+
+                    const result = await waitForUserAction(feature["properties"]["tags"]["name"]);
+
+                    if (result.action === 'save') {
+                        let liftName = result.name;
+                        outputData["resortLifts"][liftName] = feature["geometry"]["coordinates"];
+                    } else if (result.action === 'skip') {
+                        console.log("Lift wurde übersprungen.");
+                    }
+                }
+            }
+
+            const resortId = await waitForResortId();
+            outputData["resortId"] = resortId;
+
+            sidebar.innerHTML = `<h2>Verarbeitung abgeschlossen! Daten werden gesendet...</h2>`;
+
+            fetch('/add_new', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(outputData)
+            })
+            .then(response => response.json())
+            .then(result => {
+                console.log("Server response:", result);
+                sidebar.innerHTML = `
+                    <h2>Erfolgreich gespeichert!</h2>
+                    <h2>1. Bbox des neuen Skigebiets wählen</h2>
+                    <button onclick="getBboxData()">Bbox abrufen</button>
+                `;
+            })
+            .catch(error => {
+                console.error("Error sending resort data:", error);
+                sidebar.innerHTML = `
+                    <h2>Fehler beim Speichern: ${error}</h2>
+                    <h2>1. Bbox des neuen Skigebiets wählen</h2>
+                    <button onclick="getBboxData()">Bbox abrufen</button>
+                `;
+            });
+        }
+    </script>
+</body>
+</html>
