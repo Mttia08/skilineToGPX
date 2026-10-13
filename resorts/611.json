@@ -3,6 +3,16 @@
   "resortName": "Lenk",
   "resortTimezone": "Europe/Vienna",
   "resortLifts": {
+    "Bühlberglift": [
+      [
+        7.4705402,
+        46.4532965
+      ],
+      [
+        7.4718430,
+        46.4529933
+      ]
+    ],
     "Balmen": [
       [
         7.431156,
